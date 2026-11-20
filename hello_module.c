@@ -1,15 +1,25 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/printk.h>
+#include <linux/fs.h>
 
+static dev_t dev;
+static const unsigned int count = 1;
 static int __init hello_init(void)
 {
-    printk(KERN_INFO "hello world\n");
-    return 0;
+
+    int res = alloc_chrdev_region(&dev, 0, count, "hello_device");
+    if (res < 0) {
+        pr_err("alloc_chrdev_region failed: %d\n", res);
+        return res;
+    }
+        printk(KERN_INFO "hello world\n");
+        return 0;
 }
 
 static void __exit hello_exit(void)
 {
+    unregister_chrdev_region(dev, count);
     printk(KERN_INFO "bye bye world\n");
 }
 
