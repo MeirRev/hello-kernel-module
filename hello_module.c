@@ -5,6 +5,8 @@
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/err.h>
+#include <linux/uaccess.h>
+#include <linux/string.h>
 
 int res;
 static dev_t dev;
@@ -12,13 +14,24 @@ static struct cdev hello_cdev;
 struct class *hello_class;
 struct device * hello_device;
 static const unsigned int count = 1;
-static atomic_t array_count[2] = { ATOMIC_INIT(0), ATOMIC_INIT(0) };
+
+struct hello_device_state {
+    atomic_t array_count[2];
+    char data[256];
+    size_t data_len;
+};
+
+static struct hello_device_state hello_state = {
+    .array_count = { ATOMIC_INIT(0), ATOMIC_INIT(0) },
+};
+static DEFINE_MUTEX(buffer_lock);
+
 
 
 static int my_open(struct inode *ino, struct file *filp)
 {
-    filp->private_data = array_count;
-    atomic_t *counts = filp->private_data;
+    atomic_t *counts = hello_state.array_count;
+    filp->private_data = &hello_state;
     atomic_inc(&counts[0]);
     printk(KERN_INFO "hello_device: opens=%d\n", atomic_read(&counts[0]));
     return 0;
@@ -28,8 +41,8 @@ static int my_open(struct inode *ino, struct file *filp)
 
 static int my_release(struct inode *ino, struct file *file)
 {
-    atomic_t *counts;
-    counts = file->private_data;
+    struct hello_device_state *priv = file->private_data;
+    atomic_t *counts = priv->array_count;
     atomic_inc(&counts[1]);
     printk(KERN_INFO "hello_device: releases=%d\n", atomic_read(&counts[1]));
     printk(KERN_INFO "hello_device: activities=%d\n",atomic_read(&counts[0])- atomic_read(&counts[1]));
@@ -37,10 +50,88 @@ static int my_release(struct inode *ino, struct file *file)
 
 }
 
+static ssize_t my_read(struct file *filp,char __user *buff,size_t count,loff_t *offp)
+{
+    size_t available;
+    size_t n;
+    ssize_t result = 0;
+    struct hello_device_state *priv = filp->private_data;
+
+    if (*offp < 0){
+        pr_err("location no correct: %d\n", EINVAL);
+        return -EINVAL;
+    }
+
+    mutex_lock(&buffer_lock);
+    if (*offp >= (loff_t)priv->data_len)
+        goto out_unlock;
+
+    available = priv->data_len - (size_t)*offp;
+    n = count < available ? count : available;
+
+    if (copy_to_user(buff, priv->data + *offp, n) != 0) {
+        result = -EFAULT;
+        goto out_unlock;
+    }
+    *offp += n;
+    result = n ;
+    out_unlock:
+        mutex_unlock(&buffer_lock);
+        return result;
+}
+
+static ssize_t my_write(struct file *filp, const char __user *buff,size_t count, loff_t *offp){
+
+    struct hello_device_state *priv = filp->private_data;
+    char tmp[sizeof(priv->data)];
+    size_t available;
+    size_t n;
+    ssize_t result;
+
+    if (*offp < 0){
+        pr_err("location no correct: %d\n", EINVAL);
+        return -EINVAL;
+    }
+
+    if (count == 0)
+        return 0;
+
+     mutex_lock(&buffer_lock);
+
+    if (*offp >= (loff_t)sizeof(priv->data)) {
+        result = -ENOSPC;
+        goto out_unlock;
+    }
+
+    available = sizeof(priv->data) - (size_t)*offp;
+    n = count < available ? count : available;
+
+    if (copy_from_user(tmp, buff, n) != 0) {
+        result = -EFAULT;
+        goto out_unlock;
+    }
+
+    memcpy(priv->data + *offp, tmp, n);
+    *offp += n;
+
+    if ((size_t)*offp > priv->data_len)
+        priv->data_len = (size_t)*offp;
+
+    result = n;
+
+out_unlock:
+    mutex_unlock(&buffer_lock);
+    return result;
+
+}
+
+
 static const struct file_operations hello_fops = {
     .owner = THIS_MODULE,
     .open = my_open,
     .release = my_release,
+    .read = my_read,
+    .write = my_write,
 };
 
 static int __init hello_init(void)
