@@ -12,9 +12,35 @@ static struct cdev hello_cdev;
 struct class *hello_class;
 struct device * hello_device;
 static const unsigned int count = 1;
+static atomic_t array_count[2] = { ATOMIC_INIT(0), ATOMIC_INIT(0) };
+
+
+static int my_open(struct inode *ino, struct file *filp)
+{
+    filp->private_data = array_count;
+    atomic_t *counts = filp->private_data;
+    atomic_inc(&counts[0]);
+    printk(KERN_INFO "hello_device: opens=%d\n", atomic_read(&counts[0]));
+    return 0;
+
+
+}
+
+static int my_release(struct inode *ino, struct file *file)
+{
+    atomic_t *counts;
+    counts = file->private_data;
+    atomic_inc(&counts[1]);
+    printk(KERN_INFO "hello_device: releases=%d\n", atomic_read(&counts[1]));
+    printk(KERN_INFO "hello_device: activities=%d\n",atomic_read(&counts[0])- atomic_read(&counts[1]));
+    return 0;
+
+}
 
 static const struct file_operations hello_fops = {
     .owner = THIS_MODULE,
+    .open = my_open,
+    .release = my_release,
 };
 
 static int __init hello_init(void)
@@ -75,6 +101,7 @@ static void __exit hello_exit(void)
     unregister_chrdev_region(dev, count);
     printk(KERN_INFO "bye bye world\n");
 }
+
 
 module_init(hello_init);
 module_exit(hello_exit);
